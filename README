@@ -1,0 +1,9 @@
+This project was forked from "McSimp", https://github.com/McSimp/ts3-auto-afk
+
+Changenotes:
+[1.1]
+- original fork of 1.1 version
+[1.1.1]
+- added functionality to disable mute/unmute microphone
+- added functionality to disable mute/unmute sound
+- added functionality to disable plugin when in fullscreen

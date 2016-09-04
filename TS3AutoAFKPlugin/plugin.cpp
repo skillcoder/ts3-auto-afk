@@ -13,14 +13,20 @@ static bool shouldRestoreAFK;
 static bool shouldRestoreMuteSound;
 static bool shouldRestoreMuteMic;
 
-const char* ts3plugin_name()
+struct _Settings {
+	bool manipulateMic;
+	bool manipulateSound;
+	bool disableWhenFullscreen;	// If you're watching a video
+} Settings;
+
+const char* ts3plugin_name()	
 {
 	return "Auto AFK Status";
 }
 
 const char* ts3plugin_version()
 {
-    return "1.1";
+    return "1.2";
 }
 
 int ts3plugin_apiVersion()
@@ -30,7 +36,7 @@ int ts3plugin_apiVersion()
 
 const char* ts3plugin_author()
 {
-    return "McSimp";
+    return "McSimp, modified by WildOrangutan";
 }
 
 const char* ts3plugin_description()
@@ -43,37 +49,83 @@ void ts3plugin_setFunctionPointers(const struct TS3Functions funcs)
     ts3 = funcs;
 }
 
+bool IsTopMost( HWND hwnd )
+{
+  WINDOWINFO info;
+  GetWindowInfo( hwnd, &info );
+  return ( info.dwExStyle & WS_EX_TOPMOST ) ? true : false;
+}
+
+bool IsFullScreenSize( HWND hwnd, const int cx, const int cy )
+{
+  RECT r;
+  ::GetWindowRect( hwnd, &r );
+  return r.right - r.left == cx && r.bottom - r.top == cy;
+}
+
+bool IsFullscreenAndMaximized( HWND hwnd )
+{
+  if( IsTopMost( hwnd ) )
+  {
+    const int cx = GetSystemMetrics( SM_CXSCREEN );
+    const int cy = GetSystemMetrics( SM_CYSCREEN );
+    if( IsFullScreenSize( hwnd, cx, cy ) )
+      return true;
+  }
+  return false;
+}
+
+BOOL CALLBACK CheckMaximized( HWND hwnd, LPARAM lParam )
+{
+  if( IsFullscreenAndMaximized( hwnd ) )
+  {
+    * (bool*) lParam = true;
+    return FALSE; //there can be only one so quit here
+  }
+  return TRUE;
+}
+
+bool isSmthFullscreen() {
+	bool bThereIsAFullscreenWin = false;
+	EnumWindows( (WNDENUMPROC) CheckMaximized, (LPARAM) &bThereIsAFullscreenWin );
+
+	return bThereIsAFullscreenWin;
+}
+
 void setToAFK(uint64 serverID)
 {
-	// When we're setting the person as AFK, if they already have some kind of status
-	// set on their mic (muted for example), then don't unmute it when they come back.
-	int micMuted;
-	ts3.getClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, &micMuted);
+	if (Settings.manipulateMic) {
+		// When we're setting the person as AFK, if they already have some kind of status
+		// set on their mic (muted for example), then don't unmute it when they come back.
+		int micMuted;
+		ts3.getClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, &micMuted);
 
-	if(micMuted != MUTEINPUT_NONE)
-	{
-		shouldRestoreMuteMic = false;
-	}
-	else
-	{
-		shouldRestoreMuteMic = true;
-		ts3.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_MUTED);
-	}
-
-	// Same goes for speakers
-	int outMuted;
-	ts3.getClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, &outMuted);
-
-	if(outMuted != MUTEOUTPUT_NONE)
-	{
-		shouldRestoreMuteSound = false;
-	}
-	else
-	{
-		shouldRestoreMuteSound = true;
-		ts3.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_MUTED);
+		if (micMuted != MUTEINPUT_NONE)
+		{
+			shouldRestoreMuteMic = false;
+		}
+		else
+		{
+			shouldRestoreMuteMic = true;
+			ts3.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_MUTED);
+		}
 	}
 
+	if (Settings.manipulateSound) {
+		// Same goes for speakers
+		int outMuted;
+		ts3.getClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, &outMuted);
+
+		if (outMuted != MUTEOUTPUT_NONE)
+		{
+			shouldRestoreMuteSound = false;
+		}
+		else
+		{
+			shouldRestoreMuteSound = true;
+			ts3.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_MUTED);
+		}
+	}
 	// And AFK status
 	int afkStatus;
 	ts3.getClientSelfVariableAsInt(serverID, CLIENT_AWAY, &afkStatus);
@@ -102,19 +154,21 @@ void setBack(uint64 serverID)
 		ts3.setClientSelfVariableAsInt(serverID, CLIENT_AWAY, AWAY_NONE);
 	}
 
-	// Microphone toggle
-	if(shouldRestoreMuteMic)
-	{
-		shouldRestoreMuteMic = false;
-		ts3.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_NONE);
-	}
+	if(Settings.manipulateMic)
+		// Microphone toggle
+		if(shouldRestoreMuteMic)
+		{
+			shouldRestoreMuteMic = false;
+			ts3.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_NONE);
+		}
 
-	// Speaker toggle
-	if(shouldRestoreMuteSound)
-	{
-		shouldRestoreMuteSound = false;
-		ts3.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_NONE);
-	}
+	if(Settings.manipulateSound)
+		// Speaker toggle
+		if(shouldRestoreMuteSound)
+		{
+			shouldRestoreMuteSound = false;
+			ts3.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_NONE);
+		}
 			
 	ts3.flushClientSelfUpdates(serverID, NULL);
 }
@@ -164,19 +218,21 @@ void idleWatcher()
 	{
 		if((std::chrono::steady_clock::now() - start) > measureInterval)
 		{
-			if(GetLastInputInfo(&lastInput))
-			{
-				DWORD awayTimeSecs = ((GetTickCount() - lastInput.dwTime)/1000);
-				if(awayTimeSecs > secondsForIdle)
+			if (!(Settings.disableWhenFullscreen && isSmthFullscreen()))
+				if(GetLastInputInfo(&lastInput))
 				{
-					if(!isSetToAFK)
-						toggleAFK(true);
+					DWORD awayTimeSecs = ((GetTickCount() - lastInput.dwTime)/1000);
+					if(awayTimeSecs > secondsForIdle)
+					{
+						if(!isSetToAFK)
+							toggleAFK(true);
+					}
+					else if(isSetToAFK)
+					{
+						toggleAFK(false);
+					}
 				}
-				else if(isSetToAFK)
-				{
-					toggleAFK(false);
-				}
-			}
+
 			start = std::chrono::steady_clock::now();
 		}
 
@@ -191,6 +247,10 @@ int ts3plugin_requestAutoload()
 
 int ts3plugin_init()
 {
+	Settings.manipulateMic = false;
+	Settings.manipulateSound = false;
+	Settings.disableWhenFullscreen = true;
+
 	shouldExitMonitorThread = false;
 	secondsForIdle = 10 * 60;
 	idleMonitorThread = std::thread(idleWatcher);
