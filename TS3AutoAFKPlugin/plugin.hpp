@@ -10,7 +10,7 @@
 #include "ts3_functions.h"
 
 #define PLUGINS_EXPORTDLL __declspec(dllexport)
-#define PLUGIN_API_VERSION 20
+#define PLUGIN_API_VERSION 22
 
 extern "C"
 {

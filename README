@@ -1,6 +1,8 @@
 This project was forked from "McSimp", https://github.com/McSimp/ts3-auto-afk
 
 Changenotes:
+[1.1.2]
+- updated to use plugin api version 22 (compatible with ts 3.1.6)
 [1.1]
 - original fork of 1.1 version
 [1.1.1]
