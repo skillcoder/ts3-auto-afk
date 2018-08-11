@@ -1,32 +1,51 @@
-#include "plugin.hpp"
 #include <iostream>
 #include <thread>
 #include <Windows.h>
+#include <inttypes.h>
 
-static struct TS3Functions ts3;
+#include "plugin.hpp"
+#include "globals.h"
+#include "qtConfigDialog.h"
+
+using namespace std;
+using namespace Globals;
+
+#define _DEBUG true
+
+#ifdef _WIN32
+#define _strcpy(dest, destSize, src) strcpy_s(dest, destSize, src)
+#else
+#define _strcpy(dest, destSize, src) { strncpy(dest, src, destSize-1); (dest)[destSize-1] = '\0'; }
+#endif
+
+#if _DEBUG
+#define debuglog(str, ...) printf(str, __VA_ARGS__);
+#else
+#define debuglog(str, ...)
+#endif
+
+#define MAXCONNECTEDSERVERS 32
+
+//static struct TS3Functions ts3;
 static bool shouldExitMonitorThread;
 static std::thread idleMonitorThread;
-static DWORD secondsForIdle;
 static bool isSetToAFK;
 
-static bool shouldRestoreAFK;
-static bool shouldRestoreMuteSound;
-static bool shouldRestoreMuteMic;
+static uint64 connectedServers[MAXCONNECTEDSERVERS];
+static bool shouldRestoreAFK[MAXCONNECTEDSERVERS];
+static bool shouldRestoreMuteSound[MAXCONNECTEDSERVERS];
+static bool shouldRestoreMuteMic[MAXCONNECTEDSERVERS];
 
-struct _Settings {
-	bool manipulateMic;
-	bool manipulateSound;
-	bool disableWhenFullscreen;	// If you're watching a video for example
-} Settings;
+static char *description = NULL;
 
 const char* ts3plugin_name()	
 {
-	return "Auto AFK Status";
+	return PLUGIN_NAME;
 }
 
 const char* ts3plugin_version()
 {
-    return "1.1.2";
+    return PLUGIN_VERSION;
 }
 
 int ts3plugin_apiVersion()
@@ -36,19 +55,38 @@ int ts3plugin_apiVersion()
 
 const char* ts3plugin_author()
 {
-    return "McSimp, modified by WildOrangutan";
+	return PLUGIN_CREDITS " " PLUGIN_AUTHOR;
 }
 
 const char* ts3plugin_description()
-{
-    return "This plugin will automatically set your status to AFK "
-			"mute your sound, and mute your microphone if you don't "
-			"move your mouse or press any keys for 10 minutes.";
+{	
+	size_t needed = snprintf(NULL, 0, PLUGIN_DESCRIPTION, secondsForIdle, MAXCONNECTEDSERVERS) + 1;
+	
+	description = (char*)std::malloc(needed);
+	if (description) {
+		snprintf(description, needed, PLUGIN_DESCRIPTION, secondsForIdle, MAXCONNECTEDSERVERS);
+		return (const char*) description;
+	}
+	else {
+		return "description malloc failed";
+	}
+}
+
+/*
+* If the plugin wants to use error return codes, plugin commands, hotkeys or menu items, it needs to register a command ID. This function will be
+* automatically called after the plugin was initialized. This function is optional. If you don't use these features, this function can be omitted.
+* Note the passed pluginID parameter is no longer valid after calling this function, so you must copy it and store it in the plugin.
+*/
+void ts3plugin_registerPluginID(const char* id) {
+	const size_t sz = strlen(id) + 1;
+	pluginID = (char*)malloc(sz * sizeof(char));
+	_strcpy(pluginID, sz, id);  /* The id buffer will invalidate after exiting this function */
+	printf("[AutoAFK] registerPluginID: %s\n", pluginID);
 }
 
 void ts3plugin_setFunctionPointers(const struct TS3Functions funcs)
 {
-    ts3 = funcs;
+	ts3Functions = funcs;
 }
 
 bool IsTopMost( HWND hwnd )
@@ -94,116 +132,129 @@ bool isSmthFullscreen() {
 	return bThereIsAFullscreenWin;
 }
 
-void setToAFK(uint64 serverID)
+void setToAFK(int connectionIdx)
 {
-	if (Settings.manipulateMic) {
+	uint64 serverID = connectedServers[connectionIdx];
+	if (manipulateMic) {
 		// When we're setting the person as AFK, if they already have some kind of status
 		// set on their mic (muted for example), then don't unmute it when they come back.
 		int micMuted;
-		ts3.getClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, &micMuted);
+		ts3Functions.getClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, &micMuted);
 
 		if (micMuted != MUTEINPUT_NONE)
 		{
-			shouldRestoreMuteMic = false;
+			shouldRestoreMuteMic[connectionIdx] = false;
 		}
 		else
 		{
-			shouldRestoreMuteMic = true;
-			ts3.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_MUTED);
+			shouldRestoreMuteMic[connectionIdx] = true;
+			ts3Functions.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_MUTED);
 		}
 	}
 
-	if (Settings.manipulateSound) {
+	if (manipulateSound) {
 		// Same goes for speakers
 		int outMuted;
-		ts3.getClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, &outMuted);
+		ts3Functions.getClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, &outMuted);
 
 		if (outMuted != MUTEOUTPUT_NONE)
 		{
-			shouldRestoreMuteSound = false;
+			shouldRestoreMuteSound[connectionIdx] = false;
 		}
 		else
 		{
-			shouldRestoreMuteSound = true;
-			ts3.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_MUTED);
+			shouldRestoreMuteSound[connectionIdx] = true;
+			ts3Functions.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_MUTED);
 		}
 	}
 	// And AFK status
 	int afkStatus;
-	ts3.getClientSelfVariableAsInt(serverID, CLIENT_AWAY, &afkStatus);
+	ts3Functions.getClientSelfVariableAsInt(serverID, CLIENT_AWAY, &afkStatus);
 
 	if(afkStatus != AWAY_NONE)
 	{
-		shouldRestoreAFK = false;
+		shouldRestoreAFK[connectionIdx] = false;
 	}
 	else
 	{
-		shouldRestoreAFK = true;
-		ts3.setClientSelfVariableAsInt(serverID, CLIENT_AWAY, AWAY_ZZZ);
+		shouldRestoreAFK[connectionIdx] = true;
+		ts3Functions.setClientSelfVariableAsInt(serverID, CLIENT_AWAY, AWAY_ZZZ);
 	}
 
-	ts3.flushClientSelfUpdates(serverID, NULL);
+	ts3Functions.flushClientSelfUpdates(serverID, NULL);
 
 	//std::cout << "setTOAFK: " << shouldRestoreAFK << shouldRestoreMuteMic << shouldRestoreMuteSound << std::endl; 
 }
 
-void setBack(uint64 serverID)
+void setBack(int connectionIdx)
 {
+	uint64 serverID = connectedServers[connectionIdx];
 	// Set AFK status
-	if(shouldRestoreAFK)
+	if(shouldRestoreAFK[connectionIdx])
 	{
-		shouldRestoreAFK = false;
-		ts3.setClientSelfVariableAsInt(serverID, CLIENT_AWAY, AWAY_NONE);
+		shouldRestoreAFK[connectionIdx] = false;
+		ts3Functions.setClientSelfVariableAsInt(serverID, CLIENT_AWAY, AWAY_NONE);
 	}
 
-	if(Settings.manipulateMic)
+	if(manipulateMic)
 		// Microphone toggle
-		if(shouldRestoreMuteMic)
+		if(shouldRestoreMuteMic[connectionIdx])
 		{
-			shouldRestoreMuteMic = false;
-			ts3.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_NONE);
+			shouldRestoreMuteMic[connectionIdx] = false;
+			ts3Functions.setClientSelfVariableAsInt(serverID, CLIENT_INPUT_MUTED, MUTEINPUT_NONE);
 		}
 
-	if(Settings.manipulateSound)
+	if(manipulateSound)
 		// Speaker toggle
-		if(shouldRestoreMuteSound)
+		if(shouldRestoreMuteSound[connectionIdx])
 		{
-			shouldRestoreMuteSound = false;
-			ts3.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_NONE);
+			shouldRestoreMuteSound[connectionIdx] = false;
+			ts3Functions.setClientSelfVariableAsInt(serverID, CLIENT_OUTPUT_MUTED, MUTEOUTPUT_NONE);
 		}
 			
-	ts3.flushClientSelfUpdates(serverID, NULL);
+	ts3Functions.flushClientSelfUpdates(serverID, NULL);
 }
 
 void toggleAFK(bool isAFK)
 {
 	uint64* ids;
 
-    if(ts3.getServerConnectionHandlerList(&ids) != ERROR_ok)
+    if(ts3Functions.getServerConnectionHandlerList(&ids) != ERROR_ok)
 	{
-        ts3.logMessage("[AutoAFK] Error retrieving server list - cannot set AFK", LogLevel_ERROR, "Plugin", 0);
+		ts3Functions.logMessage("[AutoAFK] Error retrieving server list - cannot set AFK", LogLevel_ERROR, "Plugin", 0);
         return;
     }
+
+	if (isAFK) {
+		printf("[AutoAFK] Set AFK\n");
+	}
+	else {
+		printf("[AutoAFK] Set Back\n");
+	}
 
 	// Foreach connection
     for(int i = 0; ids[i]; i++) 
 	{
 		uint64 serverID = ids[i];
+		if (i >= MAXCONNECTEDSERVERS) break;
+		connectedServers[i] = serverID;
         anyID clid;
-        if(ts3.getClientID(serverID, &clid) == ERROR_ok)
+		//printf("%d => %" PRIu64 " ", i, serverID);
+        if(ts3Functions.getClientID(serverID, &clid) == ERROR_ok)
 		{
 			if(isAFK)
 			{
-				setToAFK(serverID);
+				setToAFK(i);
 			}
 			else
 			{
-				setBack(serverID);
+				setBack(i);
 			}
         }
     }
 
-    ts3.freeMemory(ids);
+	//printf("\n");
+	ts3Functions.freeMemory(ids);
 	isSetToAFK = isAFK;
 }
 
@@ -220,10 +271,12 @@ void idleWatcher()
 	{
 		if((std::chrono::steady_clock::now() - start) > measureInterval)
 		{
-			if (!(Settings.disableWhenFullscreen && isSmthFullscreen()))
+			if (!(disableWhenFullscreen && isSmthFullscreen()))
 				if(GetLastInputInfo(&lastInput))
 				{
 					DWORD awayTimeSecs = ((GetTickCount() - lastInput.dwTime)/1000);
+					
+					//printf("TIME %d\n", awayTimeSecs);
 					if(awayTimeSecs > secondsForIdle)
 					{
 						if(!isSetToAFK)
@@ -249,12 +302,11 @@ int ts3plugin_requestAutoload()
 
 int ts3plugin_init()
 {
-	Settings.manipulateMic = false;
-	Settings.manipulateSound = false;
-	Settings.disableWhenFullscreen = true;
+	loadConfig();
+
+	printf("%s\n", getConfigFilePath().c_str());
 
 	shouldExitMonitorThread = false;
-	secondsForIdle = 10 * 60;
 	idleMonitorThread = std::thread(idleWatcher);
 	return 0;
 }
@@ -263,4 +315,41 @@ void ts3plugin_shutdown()
 {
 	shouldExitMonitorThread = true;
 	idleMonitorThread.join();
+
+	/*
+	* Note:
+	* If your plugin implements a settings dialog, it must be closed and deleted here, else the
+	* TeamSpeak client will most likely crash (DLL removed but dialog from DLL code still open).
+	*/
+
+	/* Free pluginID if we registered it */
+	if (pluginID) {
+		free(pluginID);
+		pluginID = NULL;
+	}
+
+	//qConfigDialog.close();
+
+	std::free(description);
+	description = NULL;
+}
+
+/* Tell client if plugin offers a configuration window. If this function is not implemented, it's an assumed "does not offer" (PLUGIN_OFFERS_NO_CONFIGURE). */
+int ts3plugin_offersConfigure() {
+	printf("[AutoAFK] offersConfigure\n");
+	/*
+	* Return values:
+	* PLUGIN_OFFERS_NO_CONFIGURE         - Plugin does not implement ts3plugin_configure
+	* PLUGIN_OFFERS_CONFIGURE_NEW_THREAD - Plugin does implement ts3plugin_configure and requests to run this function in an own thread
+	* PLUGIN_OFFERS_CONFIGURE_QT_THREAD  - Plugin does implement ts3plugin_configure and requests to run this function in the Qt GUI thread
+	*/
+	return PLUGIN_OFFERS_CONFIGURE_QT_THREAD;  /* In this case ts3plugin_configure does not need to be implemented */
+}
+
+/* Plugin might offer a configuration window. If ts3plugin_offersConfigure returns 0, this function does not need to be implemented. */
+void ts3plugin_configure(void* handle, void* qParentWidget) {
+	printf("[AutoAFK] configure\n");
+	//qtConfigDialog qConfigDialog;
+	//qConfigDialog.SetupUi();
+	//qConfigDialog.exec();
 }
